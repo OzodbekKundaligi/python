@@ -1,7 +1,6 @@
 # main.py
 import os
 import logging
-import psycopg2
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import telebot
@@ -9,6 +8,10 @@ import telebot.apihelper as apihelper
 import time
 import sys
 from dotenv import load_dotenv
+
+# PostgreSQL uchun psycopg3
+import psycopg
+from psycopg.rows import dict_row
 
 from telebot import types
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
@@ -33,10 +36,10 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', '7903688837'))
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# PostgreSQL ulanish funktsiyasi
+# PostgreSQL ulanish funktsiyasi (psycopg3 uchun)
 def get_db_connection():
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg.connect(DATABASE_URL)
         return conn
     except Exception as e:
         logging.error(f"Database ulanish xatosi: {e}")
@@ -76,10 +79,18 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 started_at TIMESTAMP,
                 ended_at TIMESTAMP,
-                results TEXT,
-                CONSTRAINT fk_owner FOREIGN KEY (owner_id) REFERENCES users(user_id)
+                results TEXT
             )
         ''')
+        
+        # Foreign key constraints keyinroq qo'shamiz
+        try:
+            cursor.execute('''
+                ALTER TABLE startups 
+                ADD CONSTRAINT fk_owner FOREIGN KEY (owner_id) REFERENCES users(user_id)
+            ''')
+        except Exception as e:
+            logging.info(f"Foreign key constraint allaqachon mavjud yoki xatolik: {e}")
         
         # Startup a'zolari jadvali
         cursor.execute('''
@@ -89,9 +100,7 @@ def init_db():
                 user_id BIGINT NOT NULL,
                 status VARCHAR(20) DEFAULT 'pending',
                 joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT fk_startup FOREIGN KEY (startup_id) REFERENCES startups(startup_id) ON DELETE CASCADE,
-                CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
-                CONSTRAINT unique_membership UNIQUE(startup_id, user_id)
+                UNIQUE(startup_id, user_id)
             )
         ''')
         
@@ -108,23 +117,26 @@ def init_db():
     except Exception as e:
         logging.error(f"Database yaratishda xatolik: {e}")
         conn.rollback()
+        raise
     finally:
         cursor.close()
         conn.close()
 
-# Database funktsiyalari (PostgreSQL uchun moslashtirilgan)
+# Database funktsiyalari (psycopg3 uchun moslashtirilgan)
 def get_user(user_id: int) -> Optional[Dict]:
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         cursor.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
         user = cursor.fetchone()
-        return dict(user) if user else None
+        return user
     except Exception as e:
         logging.error(f"get_user xatosi: {e}")
         return None
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 def save_user(user_id: int, username: str, first_name: str):
@@ -148,8 +160,9 @@ def update_user_field(user_id: int, field: str, value: str):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # PostgreSQL uchun %s placeholder va column quoting
-        cursor.execute(f'UPDATE users SET {field} = %s WHERE user_id = %s', (value, user_id))
+        # psycopg3 uchun parametrli so'rov
+        query = f"UPDATE users SET {field} = %s WHERE user_id = %s"
+        cursor.execute(query, (value, user_id))
         conn.commit()
     except Exception as e:
         logging.error(f"update_user_field xatosi: {e}")
@@ -180,36 +193,41 @@ def create_startup(name: str, description: str, logo: str, group_link: str, owne
 
 def get_startup(startup_id: int) -> Optional[Dict]:
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         cursor.execute('SELECT * FROM startups WHERE startup_id = %s', (startup_id,))
         startup = cursor.fetchone()
-        return dict(startup) if startup else None
+        return startup
     except Exception as e:
         logging.error(f"get_startup xatosi: {e}")
         return None
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 def get_startups_by_owner(owner_id: int) -> List[Dict]:
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         cursor.execute('SELECT * FROM startups WHERE owner_id = %s ORDER BY created_at DESC', (owner_id,))
         startups = cursor.fetchall()
-        return [dict(s) for s in startups]
+        return startups
     except Exception as e:
         logging.error(f"get_startups_by_owner xatosi: {e}")
         return []
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 def get_pending_startups(page: int = 1, per_page: int = 5) -> Tuple[List[Dict], int]:
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         offset = (page - 1) * per_page
         cursor.execute('''
             SELECT * FROM startups 
@@ -222,18 +240,20 @@ def get_pending_startups(page: int = 1, per_page: int = 5) -> Tuple[List[Dict], 
         cursor.execute('SELECT COUNT(*) as count FROM startups WHERE status = %s', ('pending',))
         total = cursor.fetchone()['count']
         
-        return [dict(s) for s in startups], total
+        return startups, total
     except Exception as e:
         logging.error(f"get_pending_startups xatosi: {e}")
         return [], 0
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 def get_active_startups(page: int = 1, per_page: int = 10) -> Tuple[List[Dict], int]:
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         offset = (page - 1) * per_page
         cursor.execute('''
             SELECT * FROM startups 
@@ -246,12 +266,13 @@ def get_active_startups(page: int = 1, per_page: int = 10) -> Tuple[List[Dict], 
         cursor.execute('SELECT COUNT(*) as count FROM startups WHERE status = %s', ('active',))
         total = cursor.fetchone()['count']
         
-        return [dict(s) for s in startups], total
+        return startups, total
     except Exception as e:
         logging.error(f"get_active_startups xatosi: {e}")
         return [], 0
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 def update_startup_status(startup_id: int, status: str):
@@ -281,8 +302,9 @@ def update_startup_status(startup_id: int, status: str):
 
 def get_startup_members(startup_id: int, page: int = 1, per_page: int = 5) -> Tuple[List[Dict], int]:
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         offset = (page - 1) * per_page
         cursor.execute('''
             SELECT u.* FROM users u
@@ -298,12 +320,13 @@ def get_startup_members(startup_id: int, page: int = 1, per_page: int = 5) -> Tu
         ''', (startup_id,))
         total = cursor.fetchone()['count']
         
-        return [dict(m) for m in members], total
+        return members, total
     except Exception as e:
         logging.error(f"get_startup_members xatosi: {e}")
         return [], 0
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 def add_startup_member(startup_id: int, user_id: int):
@@ -356,7 +379,7 @@ def update_join_request(request_id: int, status: str):
 
 def get_statistics() -> Dict:
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = conn.cursor()
     try:
         stats = {}
         
@@ -403,36 +426,41 @@ def get_all_users():
 
 def get_recent_users(limit: int = 10):
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         cursor.execute('SELECT * FROM users ORDER BY joined_at DESC LIMIT %s', (limit,))
         users = cursor.fetchall()
-        return [dict(u) for u in users]
+        return users
     except Exception as e:
         logging.error(f"get_recent_users xatosi: {e}")
         return []
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 def get_recent_startups(limit: int = 10):
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         cursor.execute('SELECT * FROM startups ORDER BY created_at DESC LIMIT %s', (limit,))
         startups = cursor.fetchall()
-        return [dict(s) for s in startups]
+        return startups
     except Exception as e:
         logging.error(f"get_recent_startups xatosi: {e}")
         return []
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 def get_completed_startups(page: int = 1, per_page: int = 5):
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         offset = (page - 1) * per_page
         cursor.execute('''
             SELECT * FROM startups 
@@ -445,18 +473,20 @@ def get_completed_startups(page: int = 1, per_page: int = 5):
         cursor.execute('SELECT COUNT(*) as count FROM startups WHERE status = %s', ('completed',))
         total = cursor.fetchone()['count']
         
-        return [dict(s) for s in startups], total
+        return startups, total
     except Exception as e:
         logging.error(f"get_completed_startups xatosi: {e}")
         return [], 0
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 def get_rejected_startups(page: int = 1, per_page: int = 5):
     conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor = None
     try:
+        cursor = conn.cursor(row_factory=dict_row)
         offset = (page - 1) * per_page
         cursor.execute('''
             SELECT * FROM startups 
@@ -469,12 +499,13 @@ def get_rejected_startups(page: int = 1, per_page: int = 5):
         cursor.execute('SELECT COUNT(*) as count FROM startups WHERE status = %s', ('rejected',))
         total = cursor.fetchone()['count']
         
-        return [dict(s) for s in startups], total
+        return startups, total
     except Exception as e:
         logging.error(f"get_rejected_startups xatosi: {e}")
         return [], 0
     finally:
-        cursor.close()
+        if cursor:
+            cursor.close()
         conn.close()
 
 # User state management (o'zgarmadi)
@@ -489,9 +520,6 @@ def get_user_state(user_id: int) -> str:
 def clear_user_state(user_id: int):
     if user_id in user_states:
         del user_states[user_id]
-
-# Qolgan barcha funktsiyalar o'zgarmadi (faqat SQL bo'limi o'zgardi)
-# Tugmalar, menular va handlerlar butunligicha qoldi...
 
 # Orqaga tugmasini yaratish
 def create_back_button():
@@ -859,7 +887,7 @@ def approve_join_request(call):
         result = cursor.fetchone()
         
         if result:
-            startup_id, user_id = result
+            startup_id, user_id = result[0], result[1]
             update_join_request(request_id, 'accepted')
             
             startup = get_startup(startup_id)
@@ -883,6 +911,7 @@ def approve_join_request(call):
         else:
             bot.answer_callback_query(call.id, "❌ So'rov topilmadi!", show_alert=True)
         
+        cursor.close()
         conn.close()
     except Exception as e:
         logging.error(f"Approve join xatosi: {e}")
@@ -915,6 +944,7 @@ def reject_join_request(call):
         else:
             bot.answer_callback_query(call.id, "❌ So'rov topilmadi!", show_alert=True)
         
+        cursor.close()
         conn.close()
     except Exception as e:
         logging.error(f"Reject join xatosi: {e}")
@@ -1009,6 +1039,7 @@ def view_startup_details(call):
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM startup_members WHERE startup_id = %s AND status = %s', (startup_id, 'accepted'))
         member_count = cursor.fetchone()[0]
+        cursor.close()
         conn.close()
         
         status_texts = {
@@ -1023,7 +1054,7 @@ def view_startup_details(call):
         start_date = startup.get('started_at', '—')
         if start_date and start_date != '—':
             try:
-                start_date = datetime.strptime(start_date, '%Y-%m-%d %H:%M:%S').strftime('%d-%m-%Y')
+                start_date = datetime.strptime(str(start_date), '%Y-%m-%d %H:%M:%S').strftime('%d-%m-%Y')
             except:
                 pass
         
@@ -1137,7 +1168,7 @@ def view_startup_results(call):
             f"📊 <b>Startup natijalari</b>\n\n"
             f"🎯 <b>Nomi:</b> {startup['name']}\n"
             f"📝 <b>Natijalar:</b> {startup['results']}\n"
-            f"📅 <b>Yakunlangan sana:</b> {startup['ended_at'][:10] if startup.get('ended_at') else '—'}"
+            f"📅 <b>Yakunlangan sana:</b> {str(startup.get('ended_at', ''))[:10] if startup.get('ended_at') else '—'}"
         )
         
         markup = InlineKeyboardMarkup()
@@ -1215,6 +1246,7 @@ def process_startup_photo(message, startup_id, results_text):
         
         cursor.execute('SELECT user_id FROM startup_members WHERE startup_id = %s AND status = %s', (startup_id, 'accepted'))
         members = cursor.fetchall()
+        cursor.close()
         conn.close()
         
         startup = get_startup(startup_id)
@@ -1540,7 +1572,7 @@ def admin_view_startup_details(call):
             f"👤 <b>Muallif:</b> {owner_name}\n"
             f"📱 <b>Aloqa:</b> {owner_contact}\n"
             f"🔗 <b>Guruh havolasi:</b> {startup['group_link']}\n"
-            f"📅 <b>Yaratilgan sana:</b> {startup['created_at'][:10] if startup.get('created_at') else '—'}\n"
+            f"📅 <b>Yaratilgan sana:</b> {str(startup.get('created_at', ''))[:10] if startup.get('created_at') else '—'}\n"
             f"📊 <b>Holati:</b> {startup['status']}"
         )
         
@@ -1676,7 +1708,7 @@ def admin_users(message):
     )
     
     for i, user in enumerate(recent_users, 1):
-        joined_date = user.get('joined_at', '')[:10] if user.get('joined_at') else '—'
+        joined_date = str(user.get('joined_at', ''))[:10] if user.get('joined_at') else '—'
         text += f"{i}. {user.get('first_name', '')} {user.get('last_name', '')}\n"
         text += f"   👤 @{user.get('username', '—')} | 📅 {joined_date}\n\n"
     
@@ -1884,12 +1916,17 @@ def handle_other_messages(message):
 
 # Botni ishga tushirish
 if __name__ == '__main__':
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        logging.error(f"Database initialization failed: {e}")
+        # Database ishlamasa ham bot ishlaydi, lekin funksiyalar ishlamaydi
+    
     print("=" * 60)
     print("🚀 GarajHub Bot ishga tushdi...")
     print(f"👨‍💼 Admin ID: {ADMIN_ID}")
     print(f"📢 Kanal: {CHANNEL_USERNAME}")
-    print(f"🗄️ Database: PostgreSQL")
+    print(f"🗄️ Database: PostgreSQL (psycopg3)")
     try:
         print(f"🤖 Bot: @{bot.get_me().username}")
     except:
